@@ -6,7 +6,6 @@ from telebot import types
 TOKEN = "8631577489:AAGnrn_p4W-Tes7ZiYLUb-PiVEsGnUcE-hs"
 bot = telebot.TeleBot(TOKEN)
 
-# Словарь для отслеживания состояний
 user_states = {}
 
 def get_db_connection():
@@ -27,7 +26,6 @@ def init_db():
             )
         ''')
         
-        # Автоматическая миграция
         cursor.execute("PRAGMA table_info(facts)")
         columns = [column['name'] for column in cursor.fetchall()]
         
@@ -41,7 +39,6 @@ def init_db():
 
 init_db()
 
-# Регистрация меню команд в Telegram
 def set_commands():
     commands = [
         types.BotCommand("find", "Поиск по тексту или слову"),
@@ -54,7 +51,6 @@ def set_commands():
 
 set_commands()
 
-# Умная функция выделения корня русского слова для поиска
 def get_stem(word):
     word = word.lower()
     suffixes = [
@@ -73,13 +69,14 @@ def send_welcome(message):
     welcome_text = (
         "Привет! Я твой бот для базы фактов ЧГК.\n\n"
         "📌 Как добавлять: Просто отправь текст факта.\n"
-        "🔍 Команды:\n"
-        "• /find слово — Поиск по тексту (автоматически по корню)\n"
+        "🔍 Команды (используй синюю кнопку Меню слева):\n"
+        "• /find слово — Поиск по тексту\n"
         "• /tag тег — Поиск по хэштегу\n"
         "• /random — Случайный факт\n"
         "• /status — Фильтр по статусам"
     )
-    bot.send_message(message.chat.id, welcome_text)
+    # ПРИНУДИТЕЛЬНОЕ УДАЛЕНИЕ ВСЕХ КНОПОК ПОД СТРОКОЙ ВВОДА
+    bot.send_message(message.chat.id, welcome_text, reply_markup=types.ReplyKeyboardRemove())
 
 def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factcheck_status):
     readiness = readiness or '🟡 Доработка'
@@ -125,7 +122,6 @@ def find_facts(message):
         bot.send_message(message.chat.id, "⚠️ Укажи слово для поиска, например: /find физик")
         return
 
-    # Очищаем от знаков препинания и разбиваем на слова
     cleaned_query = query_raw.translate(str.maketrans('', '', string.punctuation))
     words = [w.strip() for w in cleaned_query.split() if w.strip()]
     
@@ -208,7 +204,6 @@ def handle_messages(message):
     user_id = message.from_user.id
     
     if user_id in user_states:
-        # Если пользователь передумал и отправил команду во время ввода — сбрасываем состояние
         if message.text.startswith('/'):
             del user_states[user_id]
             return
@@ -257,7 +252,6 @@ def handle_messages(message):
         del user_states[user_id]
         return
 
-    # Сохранение нового факта
     content = message.text
     with get_db_connection() as conn:
         cursor = conn.cursor()
