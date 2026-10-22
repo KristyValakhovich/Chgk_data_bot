@@ -1,4 +1,5 @@
 import sqlite3
+import string
 import telebot
 from telebot import types
 
@@ -8,32 +9,35 @@ bot = telebot.TeleBot(TOKEN)
 # Словарь для отслеживания состояний
 user_states = {}
 
-def init_db():
+def get_db_connection():
     conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS facts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            readiness TEXT DEFAULT '🟡 Доработка',
-            usage_status TEXT DEFAULT '🟢 Свободен',
-            factcheck_status TEXT DEFAULT '🔍 Фактчек'
-        )
-    ''')
-    
-    # Безопасная автоматическая миграция
-    cursor.execute("PRAGMA table_info(facts)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'readiness' not in columns:
-        cursor.execute("ALTER TABLE facts ADD COLUMN readiness TEXT DEFAULT '🟡 Доработка'")
-    if 'usage_status' not in columns:
-        cursor.execute("ALTER TABLE facts ADD COLUMN usage_status TEXT DEFAULT '🟢 Свободен'")
-    if 'factcheck_status' not in columns:
-        cursor.execute("ALTER TABLE facts ADD COLUMN factcheck_status TEXT DEFAULT '🔍 Фактчек'")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT,
+                readiness TEXT DEFAULT '🟡 Доработка',
+                usage_status TEXT DEFAULT '🟢 Свободен',
+                factcheck_status TEXT DEFAULT '🔍 Фактчек'
+            )
+        ''')
         
-    conn.commit()
-    conn.close()
+        # Автоматическая миграция
+        cursor.execute("PRAGMA table_info(facts)")
+        columns = [column['name'] for column in cursor.fetchall()]
+        
+        if 'readiness' not in columns:
+            cursor.execute("ALTER TABLE facts ADD COLUMN readiness TEXT DEFAULT '🟡 Доработка'")
+        if 'usage_status' not in columns:
+            cursor.execute("ALTER TABLE facts ADD COLUMN usage_status TEXT DEFAULT '🟢 Свободен'")
+        if 'factcheck_status' not in columns:
+            cursor.execute("ALTER TABLE facts ADD COLUMN factcheck_status TEXT DEFAULT '🔍 Фактчек'")
+        conn.commit()
 
 init_db()
 
@@ -50,13 +54,27 @@ def set_commands():
 
 set_commands()
 
+# Умная функция выделения корня русского слова для поиска
+def get_stem(word):
+    word = word.lower()
+    suffixes = [
+        'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ых', 'их', 'ами', 'ями', 'ах', 'ях',
+        'ое', 'ее', 'ый', 'ий', 'ой', 'ая', 'яя', 'ою', 'ею',
+        'ом', 'ем', 'ой', 'ей', 'ам', 'ям', 'у', 'ю', 'а', 'я', 'ы', 'и', 'о', 'е'
+    ]
+    if len(word) > 4:
+        for s in suffixes:
+            if word.endswith(s) and len(word) - len(s) >= 3:
+                return word[:-len(s)]
+    return word
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
         "Привет! Я твой бот для базы фактов ЧГК.\n\n"
         "📌 Как добавлять: Просто отправь текст факта.\n"
         "🔍 Команды:\n"
-        "• /find слово — Поиск по тексту\n"
+        "• /find слово — Поиск по тексту (автоматически по корню)\n"
         "• /tag тег — Поиск по хэштегу\n"
         "• /random — Случайный факт\n"
         "• /status — Фильтр по статусам"
@@ -77,55 +95,66 @@ def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factch
     )
     
     markup = types.InlineKeyboardMarkup()
-    # Ряд 1: Готовность
     markup.add(
         types.InlineKeyboardButton("🟡 Доработка", callback_data=f"set_ready_work_{fact_id}"),
         types.InlineKeyboardButton("🟢 Готов", callback_data=f"set_ready_ready_{fact_id}")
     )
-    # Ряд 2: Использование
     markup.add(
         types.InlineKeyboardButton("🟢 Свободен", callback_data=f"set_usage_free_{fact_id}"),
         types.InlineKeyboardButton("✅ Использовано", callback_data=f"set_usage_used_{fact_id}")
     )
-    # Ряд 3: Фактчек
     markup.add(
         types.InlineKeyboardButton("🔍 Фактчек", callback_data=f"set_fc_check_{fact_id}"),
         types.InlineKeyboardButton("✅ Проверен", callback_data=f"set_fc_verified_{fact_id}")
     )
-    # Ряд 4: Редактирование
     markup.add(
         types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{fact_id}"),
         types.InlineKeyboardButton("➕ Хэштеги", callback_data=f"addtag_{fact_id}"),
         types.InlineKeyboardButton("➕ Источник", callback_data=f"addsrc_{fact_id}")
     )
-    # Ряд 5: Удаление
     markup.add(
         types.InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_{fact_id}")
     )
     
-    # Убран parse_mode, чтобы символы вроде [ ] не ломали отправку
     bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.message_handler(commands=['find'])
 def find_facts(message):
-    query = message.text.replace('/find', '').strip()
-    if not query:
+    query_raw = message.text.replace('/find', '').strip()
+    if not query_raw:
         bot.send_message(message.chat.id, "⚠️ Укажи слово для поиска, например: /find физик")
         return
 
-    conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE content LIKE ? ORDER BY id DESC", ('%' + query + '%',))
-    rows = cursor.fetchall()
-    conn.close()
+    # Очищаем от знаков препинания и разбиваем на слова
+    cleaned_query = query_raw.translate(str.maketrans('', '', string.punctuation))
+    words = [w.strip() for w in cleaned_query.split() if w.strip()]
+    
+    if not words:
+        bot.send_message(message.chat.id, "⚠️ Укажи корректное слово для поиска.")
+        return
+
+    stems = [get_stem(w) for w in words]
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        sql = "SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE "
+        conditions = []
+        params = []
+        for stem in stems:
+            conditions.append("LOWER(content) LIKE ?")
+            params.append(f'%{stem}%')
+        
+        sql += " AND ".join(conditions) + " ORDER BY id DESC"
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
 
     if not rows:
-        bot.send_message(message.chat.id, f"🔍 По запросу «{query}» ничего не найдено.")
+        bot.send_message(message.chat.id, f"🔍 По запросу «{query_raw}» ничего не найдено.")
         return
 
     bot.send_message(message.chat.id, f"🔍 Нашел совпадений: {len(rows)}")
     for row in rows:
-        send_fact_message(message.chat.id, row[0], row[1], row[2], row[3], row[4])
+        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
 
 @bot.message_handler(commands=['tag'])
 def find_by_tag(message):
@@ -136,11 +165,10 @@ def find_by_tag(message):
     if not query.startswith('#'):
         query = '#' + query
 
-    conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE content LIKE ? ORDER BY id DESC", ('%' + query + '%',))
-    rows = cursor.fetchall()
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE LOWER(content) LIKE ? ORDER BY id DESC", ('%' + query.lower() + '%',))
+        rows = cursor.fetchall()
 
     if not rows:
         bot.send_message(message.chat.id, f"🏷 С тегом «{query}» ничего не найдено.")
@@ -148,22 +176,21 @@ def find_by_tag(message):
 
     bot.send_message(message.chat.id, f"🏷 Факты с тегом {query} ({len(rows)}):")
     for row in rows:
-        send_fact_message(message.chat.id, row[0], row[1], row[2], row[3], row[4])
+        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
 
 @bot.message_handler(commands=['random'])
 def random_fact(message):
-    conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts ORDER BY RANDOM() LIMIT 1")
-    row = cursor.fetchone()
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts ORDER BY RANDOM() LIMIT 1")
+        row = cursor.fetchone()
 
     if not row:
         bot.send_message(message.chat.id, "📭 База данных пока пуста.")
         return
 
     bot.send_message(message.chat.id, "🎲 Случайный факт из базы:")
-    send_fact_message(message.chat.id, row[0], row[1], row[2], row[3], row[4])
+    send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
 
 @bot.message_handler(commands=['status'])
 def choose_status_filter(message):
@@ -181,65 +208,66 @@ def handle_messages(message):
     user_id = message.from_user.id
     
     if user_id in user_states:
+        # Если пользователь передумал и отправил команду во время ввода — сбрасываем состояние
+        if message.text.startswith('/'):
+            del user_states[user_id]
+            return
+
         state = user_states[user_id]
         action = state['action']
         fact_id = state['fact_id']
         
-        conn = sqlite3.connect('facts.db')
-        cursor = conn.cursor()
-        
-        if action == 'edit':
-            cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (message.text, fact_id))
-            conn.commit()
-            bot.send_message(message.chat.id, f"✅ Факт #{fact_id} полностью обновлен!")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
             
-        elif action == 'addtag':
-            raw_tags = message.text.split(',')
-            formatted_tags = []
-            for t in raw_tags:
-                t = t.strip()
-                if t:
-                    if not t.startswith('#'):
-                        t = '#' + t
-                    formatted_tags.append(t)
-            
-            tag_string = " ".join(formatted_tags)
-            cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
-            row = cursor.fetchone()
-            if row and tag_string:
-                new_content = row[0] + " " + tag_string
-                cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
+            if action == 'edit':
+                cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (message.text, fact_id))
                 conn.commit()
-                bot.send_message(message.chat.id, f"✅ Хэштеги добавлены к факту #{fact_id}!")
+                bot.send_message(message.chat.id, f"✅ Факт #{fact_id} полностью обновлен!")
                 
-        elif action == 'addsrc':
-            source_text = f" [Источник: {message.text.strip()}]"
-            cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
-            row = cursor.fetchone()
-            if row:
-                new_content = row[0] + source_text
-                cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
-                conn.commit()
-                bot.send_message(message.chat.id, f"✅ Источник добавлен к факту #{fact_id}!")
+            elif action == 'addtag':
+                raw_tags = message.text.split(',')
+                formatted_tags = []
+                for t in raw_tags:
+                    t = t.strip()
+                    if t:
+                        if not t.startswith('#'):
+                            t = '#' + t
+                        formatted_tags.append(t)
                 
-        conn.close()
+                tag_string = " ".join(formatted_tags)
+                cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
+                row = cursor.fetchone()
+                if row and tag_string:
+                    new_content = row['content'] + " " + tag_string
+                    cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
+                    conn.commit()
+                    bot.send_message(message.chat.id, f"✅ Хэштеги добавлены к факту #{fact_id}!")
+                    
+            elif action == 'addsrc':
+                source_text = f" [Источник: {message.text.strip()}]"
+                cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
+                row = cursor.fetchone()
+                if row:
+                    new_content = row['content'] + source_text
+                    cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
+                    conn.commit()
+                    bot.send_message(message.chat.id, f"✅ Источник добавлен к факту #{fact_id}!")
+                    
         del user_states[user_id]
         return
 
     # Сохранение нового факта
     content = message.text
-    conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO facts (content) VALUES (?)', (content,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO facts (content) VALUES (?)', (content,))
+        conn.commit()
     bot.send_message(message.chat.id, "✅ Факт успешно сохранен со статусами по умолчанию!")
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     user_id = call.from_user.id
-    conn = sqlite3.connect('facts.db')
-    cursor = conn.cursor()
     
     if call.data.startswith("set_"):
         parts = call.data.split("_")
@@ -257,21 +285,21 @@ def callback_query(call):
             col = 'factcheck_status'
             new_val = '🔍 Фактчек' if value_key == 'check' else '✅ Проверен'
         else:
-            conn.close()
             return
             
-        cursor.execute(f"UPDATE facts SET {col} = ? WHERE id = ?", (new_val, fact_id))
-        conn.commit()
-        
-        cursor.execute("SELECT content, readiness, usage_status, factcheck_status FROM facts WHERE id = ?", (fact_id,))
-        row = cursor.fetchone()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE facts SET {col} = ? WHERE id = ?", (new_val, fact_id))
+            conn.commit()
+            
+            cursor.execute("SELECT content, readiness, usage_status, factcheck_status FROM facts WHERE id = ?", (fact_id,))
+            row = cursor.fetchone()
         
         if row:
-            content, readiness, usage_status, factcheck_status = row
-            readiness = readiness or '🟡 Доработка'
-            usage_status = usage_status or '🟢 Свободен'
-            factcheck_status = factcheck_status or '🔍 Фактчек'
+            content = row['content']
+            readiness = row['readiness'] or '🟡 Доработка'
+            usage_status = row['usage_status'] or '🟢 Свободен'
+            factcheck_status = row['factcheck_status'] or '🔍 Фактчек'
 
             updated_text = (
                 f"ID: {fact_id}\n"
@@ -293,9 +321,10 @@ def callback_query(call):
         col = parts[1]
         target_val = parts[2]
         
-        cursor.execute(f"SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE {col} = ? ORDER BY id DESC", (target_val,))
-        rows = cursor.fetchall()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE {col} = ? ORDER BY id DESC", (target_val,))
+            rows = cursor.fetchall()
         
         if not rows:
             bot.answer_callback_query(call.id, "Нет фактов с таким статусом")
@@ -305,20 +334,21 @@ def callback_query(call):
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, f"📊 Факты со статусом {target_val} ({len(rows)}):")
         for row in rows:
-            send_fact_message(call.message.chat.id, row[0], row[1], row[2], row[3], row[4])
+            send_fact_message(call.message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
         return
 
     elif call.data.startswith("edit_"):
         fact_id = call.data.split("_")[1]
-        cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
-        row = cursor.fetchone()
-        conn.close()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT content FROM facts WHERE id = ?", (fact_id,))
+            row = cursor.fetchone()
         
         if row:
             user_states[user_id] = {'action': 'edit', 'fact_id': fact_id}
             bot.answer_callback_query(call.id)
-            bot.send_message(call.message.chat.id, 
-                             f"✍️ Скопируй этот текст, исправь его и отправь мне ответным сообщением для факта #{fact_id}:\n\n{row[0]}")
+            bot.send_message(call.message.chat.id, f"✍️ Скопируй текст ниже, исправь его и отправь мне ответным сообщением для факта #{fact_id}:")
+            bot.send_message(call.message.chat.id, row['content'])
         return
         
     elif call.data.startswith("addtag_"):
@@ -337,12 +367,12 @@ def callback_query(call):
         
     elif call.data.startswith("delete_"):
         fact_id = call.data.split("_")[1]
-        cursor.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-        conn.commit()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+            conn.commit()
         bot.answer_callback_query(call.id, "Факт удален")
         bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
-        
-    conn.close()
 
 print("Бот запущен...")
 bot.infinity_polling()
