@@ -5,7 +5,7 @@ from telebot import types
 TOKEN = "8631577489:AAGnrn_p4W-Tes7ZiYLUb-PiVEsGnUcE-hs"
 bot = telebot.TeleBot(TOKEN)
 
-# Словарь для отслеживания состояний (редактирование, теги, источники)
+# Словарь для отслеживания состояний
 user_states = {}
 
 def init_db():
@@ -20,32 +20,58 @@ def init_db():
             factcheck_status TEXT DEFAULT '🔍 Фактчек'
         )
     ''')
+    
+    # Безопасная автоматическая миграция
+    cursor.execute("PRAGMA table_info(facts)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if 'readiness' not in columns:
+        cursor.execute("ALTER TABLE facts ADD COLUMN readiness TEXT DEFAULT '🟡 Доработка'")
+    if 'usage_status' not in columns:
+        cursor.execute("ALTER TABLE facts ADD COLUMN usage_status TEXT DEFAULT '🟢 Свободен'")
+    if 'factcheck_status' not in columns:
+        cursor.execute("ALTER TABLE facts ADD COLUMN factcheck_status TEXT DEFAULT '🔍 Фактчек'")
+        
     conn.commit()
     conn.close()
 
 init_db()
 
-# Создаем постоянные кнопки под чатом для удобного ввода команд
-def get_main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(types.KeyboardButton('/find'), types.KeyboardButton('/tag'))
-    markup.row(types.KeyboardButton('/status'))
-    return markup
+# Регистрация меню команд в Telegram
+def set_commands():
+    commands = [
+        types.BotCommand("find", "Поиск по тексту или слову"),
+        types.BotCommand("tag", "Поиск по хэштегу"),
+        types.BotCommand("random", "Случайный факт из базы"),
+        types.BotCommand("status", "Фильтр фактов по статусам"),
+        types.BotCommand("start", "Справка и помощь")
+    ]
+    bot.set_my_commands(commands)
+
+set_commands()
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
         "Привет! Я твой бот для базы фактов ЧГК.\n\n"
-        "📌 **Как добавлять:** Просто отправь текст факта (он получит статусы по умолчанию).\n"
-        "🔍 **Поиск:** Используй кнопки внизу экрана."
+        "📌 Как добавлять: Просто отправь текст факта.\n"
+        "🔍 Команды:\n"
+        "• /find слово — Поиск по тексту\n"
+        "• /tag тег — Поиск по хэштегу\n"
+        "• /random — Случайный факт\n"
+        "• /status — Фильтр по статусам"
     )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    bot.send_message(message.chat.id, welcome_text)
 
 def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factcheck_status):
+    readiness = readiness or '🟡 Доработка'
+    usage_status = usage_status or '🟢 Свободен'
+    factcheck_status = factcheck_status or '🔍 Фактчек'
+
     text = (
-        f"🆔 **ID:** {fact_id}\n"
+        f"ID: {fact_id}\n"
         f"• Готовность: {readiness}\n"
-        f"• Статус: {usage_status}\n"
+        f"• Использование: {usage_status}\n"
         f"• Проверка: {factcheck_status}\n\n"
         f"{content}"
     )
@@ -77,13 +103,14 @@ def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factch
         types.InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_{fact_id}")
     )
     
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    # Убран parse_mode, чтобы символы вроде [ ] не ломали отправку
+    bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.message_handler(commands=['find'])
 def find_facts(message):
     query = message.text.replace('/find', '').strip()
     if not query:
-        bot.send_message(message.chat.id, "⚠️ Укажи слово для поиска, например: `/find физик`", parse_mode="Markdown")
+        bot.send_message(message.chat.id, "⚠️ Укажи слово для поиска, например: /find физик")
         return
 
     conn = sqlite3.connect('facts.db')
@@ -93,7 +120,7 @@ def find_facts(message):
     conn.close()
 
     if not rows:
-        bot.send_message(message.chat.id, f"🔍 По запросу **«{query}»** ничего не найдено.", parse_mode="Markdown")
+        bot.send_message(message.chat.id, f"🔍 По запросу «{query}» ничего не найдено.")
         return
 
     bot.send_message(message.chat.id, f"🔍 Нашел совпадений: {len(rows)}")
@@ -104,7 +131,7 @@ def find_facts(message):
 def find_by_tag(message):
     query = message.text.replace('/tag', '').strip()
     if not query:
-        bot.send_message(message.chat.id, "⚠️ Укажи хэштег для поиска, например: `/tag физика`", parse_mode="Markdown")
+        bot.send_message(message.chat.id, "⚠️ Укажи хэштег для поиска, например: /tag физика")
         return
     if not query.startswith('#'):
         query = '#' + query
@@ -116,12 +143,27 @@ def find_by_tag(message):
     conn.close()
 
     if not rows:
-        bot.send_message(message.chat.id, f"🏷 С тегом **«{query}»** ничего не найдено.", parse_mode="Markdown")
+        bot.send_message(message.chat.id, f"🏷 С тегом «{query}» ничего не найдено.")
         return
 
     bot.send_message(message.chat.id, f"🏷 Факты с тегом {query} ({len(rows)}):")
     for row in rows:
         send_fact_message(message.chat.id, row[0], row[1], row[2], row[3], row[4])
+
+@bot.message_handler(commands=['random'])
+def random_fact(message):
+    conn = sqlite3.connect('facts.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts ORDER BY RANDOM() LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        bot.send_message(message.chat.id, "📭 База данных пока пуста.")
+        return
+
+    bot.send_message(message.chat.id, "🎲 Случайный факт из базы:")
+    send_fact_message(message.chat.id, row[0], row[1], row[2], row[3], row[4])
 
 @bot.message_handler(commands=['status'])
 def choose_status_filter(message):
@@ -149,10 +191,9 @@ def handle_messages(message):
         if action == 'edit':
             cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (message.text, fact_id))
             conn.commit()
-            bot.send_message(message.chat.id, f"✅ Факт #{fact_id} полностью обновлен!", reply_markup=get_main_keyboard())
+            bot.send_message(message.chat.id, f"✅ Факт #{fact_id} полностью обновлен!")
             
         elif action == 'addtag':
-            # Обработка хэштегов через запятую
             raw_tags = message.text.split(',')
             formatted_tags = []
             for t in raw_tags:
@@ -169,7 +210,7 @@ def handle_messages(message):
                 new_content = row[0] + " " + tag_string
                 cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
                 conn.commit()
-                bot.send_message(message.chat.id, f"✅ Хэштеги добавлены к факту #{fact_id}!", reply_markup=get_main_keyboard())
+                bot.send_message(message.chat.id, f"✅ Хэштеги добавлены к факту #{fact_id}!")
                 
         elif action == 'addsrc':
             source_text = f" [Источник: {message.text.strip()}]"
@@ -179,20 +220,20 @@ def handle_messages(message):
                 new_content = row[0] + source_text
                 cursor.execute("UPDATE facts SET content = ? WHERE id = ?", (new_content, fact_id))
                 conn.commit()
-                bot.send_message(message.chat.id, f"✅ Источник добавлен к факту #{fact_id}!", reply_markup=get_main_keyboard())
+                bot.send_message(message.chat.id, f"✅ Источник добавлен к факту #{fact_id}!")
                 
         conn.close()
         del user_states[user_id]
         return
 
-    # Сохранение нового факта (со статусами по умолчанию)
+    # Сохранение нового факта
     content = message.text
     conn = sqlite3.connect('facts.db')
     cursor = conn.cursor()
     cursor.execute('INSERT INTO facts (content) VALUES (?)', (content,))
     conn.commit()
     conn.close()
-    bot.send_message(message.chat.id, "✅ Факт успешно сохранен со статусами по умолчанию!", reply_markup=get_main_keyboard())
+    bot.send_message(message.chat.id, "✅ Факт успешно сохранен со статусами по умолчанию!")
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
@@ -201,10 +242,9 @@ def callback_query(call):
     cursor = conn.cursor()
     
     if call.data.startswith("set_"):
-        # Пример: set_ready_ready_5 или set_fc_verified_5
         parts = call.data.split("_")
-        category = parts[1] # ready, usage, fc
-        value_key = parts[2] # work/ready, free/used, check/verified
+        category = parts[1]
+        value_key = parts[2]
         fact_id = parts[3]
         
         if category == 'ready':
@@ -223,30 +263,32 @@ def callback_query(call):
         cursor.execute(f"UPDATE facts SET {col} = ? WHERE id = ?", (new_val, fact_id))
         conn.commit()
         
-        # Получаем актуальные статусы для обновления сообщения
         cursor.execute("SELECT content, readiness, usage_status, factcheck_status FROM facts WHERE id = ?", (fact_id,))
         row = cursor.fetchone()
         conn.close()
         
         if row:
             content, readiness, usage_status, factcheck_status = row
+            readiness = readiness or '🟡 Доработка'
+            usage_status = usage_status or '🟢 Свободен'
+            factcheck_status = factcheck_status or '🔍 Фактчек'
+
             updated_text = (
-                f"🆔 **ID:** {fact_id}\n"
+                f"ID: {fact_id}\n"
                 f"• Готовность: {readiness}\n"
-                f"• Статус: {usage_status}\n"
+                f"• Использование: {usage_status}\n"
                 f"• Проверка: {factcheck_status}\n\n"
                 f"{content}"
             )
             try:
                 bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                                      text=updated_text, reply_markup=call.message.reply_markup, parse_mode="Markdown")
+                                      text=updated_text, reply_markup=call.message.reply_markup)
             except Exception:
                 pass
         bot.answer_callback_query(call.id, "Статус обновлен")
         return
 
     elif call.data.startswith("filter_"):
-        # filter_column_value
         parts = call.data.split("_", 2)
         col = parts[1]
         target_val = parts[2]
@@ -257,11 +299,11 @@ def callback_query(call):
         
         if not rows:
             bot.answer_callback_query(call.id, "Нет фактов с таким статусом")
-            bot.send_message(call.message.chat.id, f"📭 Фактов со статусом **{target_val}** не найдено.", parse_mode="Markdown")
+            bot.send_message(call.message.chat.id, f"📭 Фактов со статусом {target_val} не найдено.")
             return
 
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, f"📊 Факты со статусом **{target_val}** ({len(rows)}):")
+        bot.send_message(call.message.chat.id, f"📊 Факты со статусом {target_val} ({len(rows)}):")
         for row in rows:
             send_fact_message(call.message.chat.id, row[0], row[1], row[2], row[3], row[4])
         return
