@@ -3,7 +3,7 @@ import string
 import telebot
 from telebot import types
 
-TOKEN = "ТВОЙ_ТОКЕН"
+TOKEN = "8631577489:AAGnrn_p4W-Tes7ZiYLUb-PiVEsGnUcE-hs"
 bot = telebot.TeleBot(TOKEN)
 
 user_states = {}
