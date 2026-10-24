@@ -3,7 +3,7 @@ import string
 import telebot
 from telebot import types
 
-TOKEN = "8631577489:AAGnrn_p4W-Tes7ZiYLUb-PiVEsGnUcE-hs"
+TOKEN = "ТВОЙ_ТОКЕН"
 bot = telebot.TeleBot(TOKEN)
 
 user_states = {}
@@ -22,7 +22,8 @@ def init_db():
                 content TEXT,
                 readiness TEXT DEFAULT '🟡 Доработка',
                 usage_status TEXT DEFAULT '🟢 Свободен',
-                factcheck_status TEXT DEFAULT '🔍 Фактчек'
+                factcheck_status TEXT DEFAULT '🔍 Фактчек',
+                photo_file_id TEXT
             )
         ''')
         
@@ -35,6 +36,8 @@ def init_db():
             cursor.execute("ALTER TABLE facts ADD COLUMN usage_status TEXT DEFAULT '🟢 Свободен'")
         if 'factcheck_status' not in columns:
             cursor.execute("ALTER TABLE facts ADD COLUMN factcheck_status TEXT DEFAULT '🔍 Фактчек'")
+        if 'photo_file_id' not in columns:
+            cursor.execute("ALTER TABLE facts ADD COLUMN photo_file_id TEXT")
         conn.commit()
 
 init_db()
@@ -68,17 +71,16 @@ def get_stem(word):
 def send_welcome(message):
     welcome_text = (
         "Привет! Я твой бот для базы фактов ЧГК.\n\n"
-        "📌 Как добавлять: Просто отправь текст факта.\n"
+        "📌 Как добавлять: Отправь текст факта или картинку (с подписью или без).\n"
         "🔍 Команды (используй синюю кнопку Меню слева):\n"
         "• /find слово — Поиск по тексту\n"
         "• /tag тег — Поиск по хэштегу\n"
         "• /random — Случайный факт\n"
         "• /status — Фильтр по статусам"
     )
-    # ПРИНУДИТЕЛЬНОЕ УДАЛЕНИЕ ВСЕХ КНОПОК ПОД СТРОКОЙ ВВОДА
     bot.send_message(message.chat.id, welcome_text, reply_markup=types.ReplyKeyboardRemove())
 
-def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factcheck_status):
+def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factcheck_status, photo_file_id=None):
     readiness = readiness or '🟡 Доработка'
     usage_status = usage_status or '🟢 Свободен'
     factcheck_status = factcheck_status or '🔍 Фактчек'
@@ -113,7 +115,10 @@ def send_fact_message(chat_id, fact_id, content, readiness, usage_status, factch
         types.InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_{fact_id}")
     )
     
-    bot.send_message(chat_id, text, reply_markup=markup)
+    if photo_file_id:
+        bot.send_photo(chat_id, photo_file_id, caption=text, reply_markup=markup)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.message_handler(commands=['find'])
 def find_facts(message):
@@ -133,7 +138,7 @@ def find_facts(message):
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        sql = "SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE "
+        sql = "SELECT id, content, readiness, usage_status, factcheck_status, photo_file_id FROM facts WHERE "
         conditions = []
         params = []
         for stem in stems:
@@ -150,7 +155,7 @@ def find_facts(message):
 
     bot.send_message(message.chat.id, f"🔍 Нашел совпадений: {len(rows)}")
     for row in rows:
-        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
+        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'], row['photo_file_id'])
 
 @bot.message_handler(commands=['tag'])
 def find_by_tag(message):
@@ -163,7 +168,7 @@ def find_by_tag(message):
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE LOWER(content) LIKE ? ORDER BY id DESC", ('%' + query.lower() + '%',))
+        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status, photo_file_id FROM facts WHERE LOWER(content) LIKE ? ORDER BY id DESC", ('%' + query.lower() + '%',))
         rows = cursor.fetchall()
 
     if not rows:
@@ -172,13 +177,13 @@ def find_by_tag(message):
 
     bot.send_message(message.chat.id, f"🏷 Факты с тегом {query} ({len(rows)}):")
     for row in rows:
-        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
+        send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'], row['photo_file_id'])
 
 @bot.message_handler(commands=['random'])
 def random_fact(message):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status FROM facts ORDER BY RANDOM() LIMIT 1")
+        cursor.execute("SELECT id, content, readiness, usage_status, factcheck_status, photo_file_id FROM facts ORDER BY RANDOM() LIMIT 1")
         row = cursor.fetchone()
 
     if not row:
@@ -186,7 +191,7 @@ def random_fact(message):
         return
 
     bot.send_message(message.chat.id, "🎲 Случайный факт из базы:")
-    send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
+    send_fact_message(message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'], row['photo_file_id'])
 
 @bot.message_handler(commands=['status'])
 def choose_status_filter(message):
@@ -199,13 +204,15 @@ def choose_status_filter(message):
     markup.add(types.InlineKeyboardButton("✅ Проверен", callback_data="filter_factcheck_status_✅ Проверен"))
     bot.send_message(message.chat.id, "📊 Выбери статус для фильтрации:", reply_markup=markup)
 
-@bot.message_handler(func=lambda message: True)
+@bot.message_handler(content_types=['text', 'photo'])
 def handle_messages(message):
     user_id = message.from_user.id
     
     if user_id in user_states:
-        if message.text.startswith('/'):
+        if message.content_type != 'text' or message.text.startswith('/'):
             del user_states[user_id]
+            if message.content_type != 'text':
+                bot.send_message(message.chat.id, "⚠️ Ожидался текстовый ввод. Действие отменено.")
             return
 
         state = user_states[user_id]
@@ -252,11 +259,19 @@ def handle_messages(message):
         del user_states[user_id]
         return
 
-    content = message.text
+    # Обработка нового факта (текст или фото с подписью/без)
+    if message.content_type == 'photo':
+        photo_file_id = message.photo[-1].file_id
+        content = message.caption if message.caption else "🖼 [Картинка без текста]"
+    else:
+        photo_file_id = None
+        content = message.text
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO facts (content) VALUES (?)', (content,))
+        cursor.execute('INSERT INTO facts (content, photo_file_id) VALUES (?, ?)', (content, photo_file_id))
         conn.commit()
+    
     bot.send_message(message.chat.id, "✅ Факт успешно сохранен со статусами по умолчанию!")
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -286,7 +301,7 @@ def callback_query(call):
             cursor.execute(f"UPDATE facts SET {col} = ? WHERE id = ?", (new_val, fact_id))
             conn.commit()
             
-            cursor.execute("SELECT content, readiness, usage_status, factcheck_status FROM facts WHERE id = ?", (fact_id,))
+            cursor.execute("SELECT content, readiness, usage_status, factcheck_status, photo_file_id FROM facts WHERE id = ?", (fact_id,))
             row = cursor.fetchone()
         
         if row:
@@ -294,6 +309,7 @@ def callback_query(call):
             readiness = row['readiness'] or '🟡 Доработка'
             usage_status = row['usage_status'] or '🟢 Свободен'
             factcheck_status = row['factcheck_status'] or '🔍 Фактчек'
+            photo_file_id = row['photo_file_id']
 
             updated_text = (
                 f"ID: {fact_id}\n"
@@ -303,21 +319,34 @@ def callback_query(call):
                 f"{content}"
             )
             try:
-                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                                      text=updated_text, reply_markup=call.message.reply_markup)
+                if call.message.content_type == 'photo':
+                    bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                                             caption=updated_text, reply_markup=call.message.reply_markup)
+                else:
+                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                                          text=updated_text, reply_markup=call.message.reply_markup)
             except Exception:
                 pass
         bot.answer_callback_query(call.id, "Статус обновлен")
         return
 
     elif call.data.startswith("filter_"):
-        parts = call.data.split("_", 2)
-        col = parts[1]
-        target_val = parts[2]
+        # Надежное разделение для фильтров со статусами, содержащими подчеркивания
+        if call.data.startswith("filter_readiness_"):
+            col = "readiness"
+            target_val = call.data[len("filter_readiness_"):]
+        elif call.data.startswith("filter_usage_status_"):
+            col = "usage_status"
+            target_val = call.data[len("filter_usage_status_"):]
+        elif call.data.startswith("filter_factcheck_status_"):
+            col = "factcheck_status"
+            target_val = call.data[len("filter_factcheck_status_"):]
+        else:
+            return
         
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT id, content, readiness, usage_status, factcheck_status FROM facts WHERE {col} = ? ORDER BY id DESC", (target_val,))
+            cursor.execute(f"SELECT id, content, readiness, usage_status, factcheck_status, photo_file_id FROM facts WHERE {col} = ? ORDER BY id DESC", (target_val,))
             rows = cursor.fetchall()
         
         if not rows:
@@ -328,7 +357,7 @@ def callback_query(call):
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, f"📊 Факты со статусом {target_val} ({len(rows)}):")
         for row in rows:
-            send_fact_message(call.message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'])
+            send_fact_message(call.message.chat.id, row['id'], row['content'], row['readiness'], row['usage_status'], row['factcheck_status'], row['photo_file_id'])
         return
 
     elif call.data.startswith("edit_"):
